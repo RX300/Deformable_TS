@@ -99,7 +99,7 @@ class DeformNetwork(nn.Module):
         else:
             self.gaussian_warp = nn.Linear(W, 3)
         self.gaussian_rotation = nn.Linear(W, 4)
-        self.gaussian_scaling = nn.Linear(W, 3)
+        self.gaussian_scaling = nn.Linear(W, 1)
 
     def forward(self, x, t):
         t_emb = self.embed_time_fn(t)
@@ -125,5 +125,5 @@ class DeformNetwork(nn.Module):
             d_xyz = self.gaussian_warp(h)
         scaling = self.gaussian_scaling(h)
         rotation = self.gaussian_rotation(h)
-
-        return d_xyz, rotation, scaling
+        sigma_scaling = self.gaussian_scaling(h)
+        return d_xyz, rotation, scaling, sigma_scaling

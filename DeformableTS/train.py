@@ -100,7 +100,7 @@ def training(
         iter_start.record()
 
         triangles.update_learning_rate(iteration)
-
+        
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
             triangles.oneupSHdegree()
@@ -122,14 +122,14 @@ def training(
         smooth_term = get_linear_noise_func(lr_init=0.1, lr_final=1e-15, lr_delay_mult=0.01, max_steps=20000)
         
         if iteration < opt.warm_up:
-            d_xyz, d_rotation, d_scaling = 0.0, 0.0, 0.0
+            d_xyz, d_rotation, d_scaling, d_sigma_scaling = 0.0, 0.0, 0.0
             use_deform = False
         else:
             N = triangles.get_number_of_points
             time_input = fid.unsqueeze(0).expand(N, -1)
 
             ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(N, -1) * time_interval * smooth_term(iteration)
-            d_xyz, d_rotation, d_scaling = deform.step(triangles.get_triangles_centroids.detach(), time_input + ast_noise)
+            d_xyz, d_rotation, d_scaling, d_sigma_scaling = deform.step(triangles.get_triangles_centroids.detach(), time_input + ast_noise)
             use_deform = True
 
         # Render
@@ -139,7 +139,7 @@ def training(
         bg = torch.rand((3), device="cuda") if opt.random_background else background
 
         # render_pkg = render(viewpoint_cam, triangles, pipe, bg)
-        render_pkg = render(viewpoint_cam, triangles, pipe, bg, d_xyz=d_xyz, d_rotation=d_rotation, d_scaling=d_scaling, use_deform=use_deform)
+        render_pkg = render(viewpoint_cam, triangles, pipe, bg, d_xyz=d_xyz, d_rotation=d_rotation, d_scaling=d_scaling, d_sigma_scaling=d_sigma_scaling, use_deform=use_deform)
         image = render_pkg["render"]
 
         # largest distance from point to center of image
@@ -207,7 +207,8 @@ def training(
 
             # Log and save
             
-            training_report(tb_writer, iteration, pixel_loss, loss, loss_fn, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background,d_xyz, d_rotation, d_scaling, use_deform))
+            training_report(tb_writer, iteration, pixel_loss, loss, loss_fn, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, 
+                            (pipe, background,d_xyz, d_rotation, d_scaling, d_sigma_scaling, use_deform))
             if iteration in save_iterations:
                 print("\n[ITER {}] Saving Triangles".format(iteration))
                 scene.save(iteration)
@@ -272,7 +273,10 @@ def training(
 
             if iteration < opt.iterations:
                 triangles.optimizer.step()
+                deform.optimizer.step()
                 triangles.optimizer.zero_grad(set_to_none = True)
+                deform.optimizer.zero_grad()
+                deform.update_learning_rate(iteration)
                 
     print("Training is done")
 
@@ -360,7 +364,8 @@ if __name__ == "__main__":
     pp = PipelineParams(parser)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int,
+                        default=[5000, 6000, 7_000] + list(range(10000, 40001, 1000)))
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
