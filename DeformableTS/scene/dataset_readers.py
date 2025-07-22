@@ -24,7 +24,7 @@ import cv2 as cv
 from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
-from scene.gaussian_model import BasicPointCloud
+from scene.triangle_model import BasicPointCloud
 from utils.camera_utils import camera_nerfies_from_JSON
 
 

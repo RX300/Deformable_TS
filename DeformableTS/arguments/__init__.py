@@ -65,6 +65,7 @@ class ModelParams(ParamGroup):
         self._white_background = False
         self.data_device = "cuda"
         self.eval = False
+        self.load2gpu_on_the_fly = False
         self.is_blender = False
         self.is_6dof = False
         self.source_type = ""  # Dataset type: Colmap, Blender, DTU, PlenopticVideo, Nerfies

@@ -83,9 +83,9 @@ def render(viewpoint_camera, pc : TriangleModel, pipe, bg_color : torch.Tensor, 
         norm_d_rotation = torch.nn.functional.normalize(d_rotation, p=2, dim=1)
         w, x, y, z = norm_d_rotation[:, 0], norm_d_rotation[:, 1], norm_d_rotation[:, 2], norm_d_rotation[:, 3]
         
-        # 计算旋转矩阵
-        N = triangles_points.shape[0]
-        rotation_matrices = torch.zeros((N, 3, 3), device=triangles_points.device)
+        # 计算旋转矩阵 - 使用d_rotation的实际大小
+        num_triangles = d_rotation.shape[0]
+        rotation_matrices = torch.zeros((num_triangles, 3, 3), device=triangles_points.device)
         
         rotation_matrices[:, 0, 0] = 1 - 2*y*y - 2*z*z
         rotation_matrices[:, 0, 1] = 2*x*y - 2*z*w
@@ -99,21 +99,21 @@ def render(viewpoint_camera, pc : TriangleModel, pipe, bg_color : torch.Tensor, 
         rotation_matrices[:, 2, 1] = 2*y*z + 2*x*w
         rotation_matrices[:, 2, 2] = 1 - 2*x*x - 2*y*y
 
-        # 2. 计算每个三角形的质心
+        # 2. 计算每个三角形的质心 shape: (N, 3)
         centroids = pc.get_triangles_centroids
 
         # 3. 将顶点移动到以质心为原点的局部坐标系
-        triangles_local = pc.get_triangles_points - centroids
+        triangles_local = pc.get_triangles_points - centroids.unsqueeze(1)
 
         # 4. 应用缩放和旋转
         scaled_triangles = triangles_local * d_scaling.unsqueeze(1)
         rotated_triangles = torch.bmm(scaled_triangles, rotation_matrices)
 
         # 5. 将顶点移回世界坐标系并应用最终的位移
-        triangles_points_deform = rotated_triangles + centroids + d_xyz.unsqueeze(1)
+        triangles_points_deform = rotated_triangles + centroids.unsqueeze(1) + d_xyz.unsqueeze(1)
 
         # 6. 展平
-        triangles_points = triangles_points_deform.flatten(0)
+        triangles_points = triangles_points_deform.view(-1, 3).flatten()
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.

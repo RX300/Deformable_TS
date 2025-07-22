@@ -113,11 +113,12 @@ def training(
             else:
                 new_round = False
 
+        total_frame = len(viewpoint_stack)
+        time_interval = 1 / total_frame
+
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         fid = viewpoint_cam.fid
 
-        total_frame = len(viewpoint_stack)
-        time_interval = 1 / total_frame
         smooth_term = get_linear_noise_func(lr_init=0.1, lr_final=1e-15, lr_delay_mult=0.01, max_steps=20000)
         
         if iteration < opt.warm_up:
@@ -206,7 +207,7 @@ def training(
 
             # Log and save
             
-            training_report(tb_writer, iteration, pixel_loss, loss, loss_fn, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+            training_report(tb_writer, iteration, pixel_loss, loss, loss_fn, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background,d_xyz, d_rotation, d_scaling, use_deform))
             if iteration in save_iterations:
                 print("\n[ITER {}] Saving Triangles".format(iteration))
                 scene.save(iteration)
