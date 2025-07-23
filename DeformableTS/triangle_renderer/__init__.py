@@ -28,6 +28,98 @@ from utils.sh_utils import eval_sh
 from utils.point_utils import depth_to_normal
 
 
+def add_new_points(pc : TriangleModel,d_xyz : torch.Tensor, d_rotation : torch.Tensor,
+            d_scaling : torch.Tensor, d_sigma_scaling : torch.tensor):
+    # 结合 d_xyz, d_rotation, d_scaling 对已有的triangles_points进行变形
+    # 1. 将四元数 d_rotation 转换为旋转矩阵
+    # 归一化四元数以确保是单位四元数
+    norm_d_rotation = torch.nn.functional.normalize(d_rotation, p=2, dim=1)
+    w, x, y, z = norm_d_rotation[:, 0], norm_d_rotation[:, 1], norm_d_rotation[:, 2], norm_d_rotation[:, 3]
+    
+    # 计算旋转矩阵 - 使用d_rotation的实际大小
+    num_triangles = pc.get_triangles_points.shape[0]
+    rotation_matrices = torch.zeros((num_triangles, 3, 3), device=pc.get_triangles_points.device)
+    
+    rotation_matrices[:, 0, 0] = 1 - 2*y*y - 2*z*z
+    rotation_matrices[:, 0, 1] = 2*x*y - 2*z*w
+    rotation_matrices[:, 0, 2] = 2*x*z + 2*y*w
+    
+    rotation_matrices[:, 1, 0] = 2*x*y + 2*z*w
+    rotation_matrices[:, 1, 1] = 1 - 2*x*x - 2*z*z
+    rotation_matrices[:, 1, 2] = 2*y*z - 2*x*w
+    
+    rotation_matrices[:, 2, 0] = 2*x*z - 2*y*w
+    rotation_matrices[:, 2, 1] = 2*y*z + 2*x*w
+    rotation_matrices[:, 2, 2] = 1 - 2*x*x - 2*y*y
+
+    # 2. 计算每个三角形的质心 shape: (N, 3)
+    centroids = pc.get_triangles_centroids
+
+    # 3. 将顶点移动到以质心为原点的局部坐标系
+    triangles_local = pc.get_triangles_points - centroids.unsqueeze(1)
+
+    # 4. 应用缩放和旋转
+    scaled_triangles = triangles_local * d_scaling.unsqueeze(1)
+    rotated_triangles = torch.bmm(scaled_triangles, rotation_matrices)
+
+    # 5. 将顶点移回世界坐标系并应用最终的位移
+    triangles_points_deform = rotated_triangles + centroids.unsqueeze(1) + d_xyz.unsqueeze(1)
+    # triangles_points_deform = rotated_triangles + centroids.unsqueeze(1)
+
+    # 6. 展平
+    triangles_points = triangles_points_deform.view(-1, 3).flatten()
+
+    return triangles_points
+
+def add_new_points_v2(pc : TriangleModel,d_xyz : torch.Tensor, d_rotation : torch.Tensor,
+            d_scaling : torch.Tensor, d_sigma_scaling : torch.tensor):
+
+    triangle_centroids = pc.get_triangles_centroids
+    deformed_centroids = triangle_centroids + d_xyz
+    
+    norm_d_rotation = torch.nn.functional.normalize(d_rotation, p=2, dim=1)
+    w, x, y, z = norm_d_rotation[:, 0], norm_d_rotation[:, 1], norm_d_rotation[:, 2], norm_d_rotation[:, 3]
+    # Normalize quaternions
+    quat_norm = torch.sqrt(w*w + x*x + y*y + z*z)  # [N]
+    w, x, y, z = w/quat_norm, x/quat_norm, y/quat_norm, z/quat_norm
+    
+    R = torch.zeros(triangle_centroids.shape[0], 3, 3, device=triangle_centroids.device, dtype=triangle_centroids.dtype)
+    R[:, 0, 0] = 1 - 2*(y*y + z*z)
+    R[:, 0, 1] = 2*(x*y - w*z)
+    R[:, 0, 2] = 2*(x*z + w*y)
+    R[:, 1, 0] = 2*(x*y + w*z)
+    R[:, 1, 1] = 1 - 2*(x*x + z*z)
+    R[:, 1, 2] = 2*(y*z - w*x)
+    R[:, 2, 0] = 2*(x*z - w*y)
+    R[:, 2, 1] = 2*(y*z + w*x)
+    R[:, 2, 2] = 1 - 2*(x*x + y*y)
+
+    # Get scaling factors [N, 3] for x, y, z
+    scale = torch.exp(d_scaling)  # Apply exponential to ensure positive scaling [N, 3]
+    
+    # Create diagonal scaling matrices [N, 3, 3]
+    scale_matrix = torch.zeros(triangle_centroids.shape[0], 3, 3, device=triangle_centroids.device, dtype=triangle_centroids.dtype)
+    scale_matrix[:, 0, 0] = scale[:, 0]
+    scale_matrix[:, 1, 1] = scale[:, 0]
+    scale_matrix[:, 2, 2] = scale[:, 0]
+
+    # Vectorized transformation for all triangles
+    # 1. Translate triangle vertices to origin (relative to original centroids)
+    triangle_centered = pc.get_triangles_points - triangle_centroids.unsqueeze(1)  # [N, 3, 3]
+    
+    # 2. Apply scaling (batch matrix multiplication)
+    # triangle_centered: [N, 3, 3], scale_matrix: [N, 3, 3]
+    triangle_scaled = torch.bmm(triangle_centered, scale_matrix.transpose(-2, -1))  # [N, 3, 3]
+    
+    # 3. Apply rotation (batch matrix multiplication)
+    # triangle_scaled: [N, 3, 3], R: [N, 3, 3]
+    triangle_rotated = torch.bmm(triangle_scaled, R.transpose(-2, -1))  # [N, 3, 3]
+    
+    # 4. Translate to deformed centroid positions (includes d_xyz translation)
+    triangles_points = triangle_rotated + deformed_centroids.unsqueeze(1)  # [N, 3, 3]
+    triangles_points = triangles_points.view(-1, 3).flatten(0)  # Flatten to [N*3*3]
+    return triangles_points
+
 def render(viewpoint_camera, pc : TriangleModel, pipe, bg_color : torch.Tensor, d_xyz : torch.Tensor, d_rotation : torch.Tensor,
             d_scaling : torch.Tensor, d_sigma_scaling : torch.tensor, use_deform : bool, scaling_modifier = 1.0, override_color = None):
     """
@@ -69,121 +161,23 @@ def render(viewpoint_camera, pc : TriangleModel, pipe, bg_color : torch.Tensor, 
 
     opacity = pc.get_opacity
     # triangles_points.shape : N*3*3
-    triangles_points = pc.get_triangles_points_flatten
+    # triangles_points = pc.get_triangles_points_flatten
     sigma = pc.get_sigma
     num_points_per_triangle = pc.get_num_points_per_triangle
     cumsum_of_points_per_triangle = pc.get_cumsum_of_points_per_triangle
     number_of_points = pc.get_number_of_points
     means2D = screenspace_points
 
+    triangles_points = torch.empty(0, device=pc.get_triangles_points.device, dtype=pc.get_triangles_points.dtype)
     if use_deform:
-        # 结合 d_xyz, d_rotation, d_scaling 对已有的triangles_points进行变形
-        # 1. 将四元数 d_rotation 转换为旋转矩阵
-        # 归一化四元数以确保是单位四元数
-        norm_d_rotation = torch.nn.functional.normalize(d_rotation, p=2, dim=1)
-        w, x, y, z = norm_d_rotation[:, 0], norm_d_rotation[:, 1], norm_d_rotation[:, 2], norm_d_rotation[:, 3]
-        
-        # 计算旋转矩阵 - 使用d_rotation的实际大小
-        num_triangles = d_rotation.shape[0]
-        rotation_matrices = torch.zeros((num_triangles, 3, 3), device=triangles_points.device)
-        
-        rotation_matrices[:, 0, 0] = 1 - 2*y*y - 2*z*z
-        rotation_matrices[:, 0, 1] = 2*x*y - 2*z*w
-        rotation_matrices[:, 0, 2] = 2*x*z + 2*y*w
-        
-        rotation_matrices[:, 1, 0] = 2*x*y + 2*z*w
-        rotation_matrices[:, 1, 1] = 1 - 2*x*x - 2*z*z
-        rotation_matrices[:, 1, 2] = 2*y*z - 2*x*w
-        
-        rotation_matrices[:, 2, 0] = 2*x*z - 2*y*w
-        rotation_matrices[:, 2, 1] = 2*y*z + 2*x*w
-        rotation_matrices[:, 2, 2] = 1 - 2*x*x - 2*y*y
+        triangles_points = add_new_points_v2(pc, d_xyz, d_rotation, d_scaling, d_sigma_scaling)
+    else:
+        triangles_points = pc.get_triangles_points_flatten
 
-        # 2. 计算每个三角形的质心 shape: (N, 3)
-        centroids = pc.get_triangles_centroids
-
-        # 3. 将顶点移动到以质心为原点的局部坐标系
-        triangles_local = pc.get_triangles_points - centroids.unsqueeze(1)
-
-        # 4. 应用缩放和旋转
-        scaled_triangles = triangles_local * d_scaling.unsqueeze(1)
-        rotated_triangles = torch.bmm(scaled_triangles, rotation_matrices)
-
-        # 5. 将顶点移回世界坐标系并应用最终的位移
-        # triangles_points_deform = rotated_triangles + centroids.unsqueeze(1) + d_xyz.unsqueeze(1)
-        triangles_points_deform = rotated_triangles + centroids.unsqueeze(1)
-
-        # 6. 展平
-        triangles_points = triangles_points_deform.view(-1, 3).flatten()
 
     # if use_deform:
-    #     # 结合 d_xyz, d_rotation, d_scaling 对已有的triangles_points进行变形
-    #     # 1. 将四元数 d_rotation 转换为旋转矩阵
-    #     # 归一化四元数以确保是单位四元数
-    #     norm_d_rotation = torch.nn.functional.normalize(d_rotation, p=2, dim=1)
-    #     w, x, y, z = norm_d_rotation[:, 0], norm_d_rotation[:, 1], norm_d_rotation[:, 2], norm_d_rotation[:, 3]
-        
-    #     # 计算旋转矩阵 - 使用d_rotation的实际大小
-    #     num_triangles = d_rotation.shape[0]
-    #     rotation_matrices = torch.zeros((num_triangles, 3, 3), device=triangles_points.device)
-        
-    #     rotation_matrices[:, 0, 0] = 1 - 2*y*y - 2*z*z
-    #     rotation_matrices[:, 0, 1] = 2*x*y - 2*z*w
-    #     rotation_matrices[:, 0, 2] = 2*x*z + 2*y*w
-        
-    #     rotation_matrices[:, 1, 0] = 2*x*y + 2*z*w
-    #     rotation_matrices[:, 1, 1] = 1 - 2*x*x - 2*z*z
-    #     rotation_matrices[:, 1, 2] = 2*y*z - 2*x*w
-        
-    #     rotation_matrices[:, 2, 0] = 2*x*z - 2*y*w
-    #     rotation_matrices[:, 2, 1] = 2*y*z + 2*x*w
-    #     rotation_matrices[:, 2, 2] = 1 - 2*x*x - 2*y*y
-
-    #     # 2. 计算每个三角形的质心 shape: (N, 3)
-    #     triangle_centroids = pc.get_triangles_centroids
-    #     deformed_centroids = triangle_centroids + d_xyz
-    #     quat = d_rotation  # [N, 4]
-    #     w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]  # Each [N]
-        
-    #     # Normalize quaternions
-    #     quat_norm = torch.sqrt(w*w + x*x + y*y + z*z)  # [N]
-    #     w, x, y, z = w/quat_norm, x/quat_norm, y/quat_norm, z/quat_norm
-        
-    #     R = torch.zeros(triangle_centroids.shape[0], 3, 3, device=triangle_centroids.device, dtype=triangle_centroids.dtype)
-    #     R[:, 0, 0] = 1 - 2*(y*y + z*z)
-    #     R[:, 0, 1] = 2*(x*y - w*z)
-    #     R[:, 0, 2] = 2*(x*z + w*y)
-    #     R[:, 1, 0] = 2*(x*y + w*z)
-    #     R[:, 1, 1] = 1 - 2*(x*x + z*z)
-    #     R[:, 1, 2] = 2*(y*z - w*x)
-    #     R[:, 2, 0] = 2*(x*z - w*y)
-    #     R[:, 2, 1] = 2*(y*z + w*x)
-    #     R[:, 2, 2] = 1 - 2*(x*x + y*y)
-
-    #     # Get scaling factors [N, 3] for x, y, z
-    #     scale = torch.exp(d_scaling)  # Apply exponential to ensure positive scaling [N, 3]
-        
-    #     # Create diagonal scaling matrices [N, 3, 3]
-    #     scale_matrix = torch.zeros(triangle_centroids.shape[0], 3, 3, device=triangle_centroids.device, dtype=triangle_centroids.dtype)
-    #     scale_matrix[:, 0, 0] = scale[:, 0]
-    #     scale_matrix[:, 1, 1] = scale[:, 1]
-    #     scale_matrix[:, 2, 2] = scale[:, 2]
-
-    #     # Vectorized transformation for all triangles
-    #     # 1. Translate triangle vertices to origin (relative to original centroids)
-    #     triangle_centered = pc.get_triangles_points - triangle_centroids.unsqueeze(1)  # [N, 3, 3]
-        
-    #     # 2. Apply scaling (batch matrix multiplication)
-    #     # triangle_centered: [N, 3, 3], scale_matrix: [N, 3, 3]
-    #     triangle_scaled = torch.bmm(triangle_centered, scale_matrix.transpose(-2, -1))  # [N, 3, 3]
-        
-    #     # 3. Apply rotation (batch matrix multiplication)
-    #     # triangle_scaled: [N, 3, 3], R: [N, 3, 3]
-    #     triangle_rotated = torch.bmm(triangle_scaled, R.transpose(-2, -1))  # [N, 3, 3]
-        
-    #     # 4. Translate to deformed centroid positions (includes d_xyz translation)
-    #     triangles_points = triangle_rotated + deformed_centroids.unsqueeze(1)  # [N, 3, 3]
-    #     triangles_points = triangles_points.view(-1, 3).flatten(0)  # Flatten to [N*3, 3]
+    #     triangles_points = pc.get_triangles_points + d_xyz.unsqueeze(1)
+    #     triangles_points = triangles_points.view(-1, 3).flatten(0)
 
     # sigma *= d_sigma_scaling
 
