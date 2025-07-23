@@ -122,7 +122,7 @@ def training(
         smooth_term = get_linear_noise_func(lr_init=0.1, lr_final=1e-15, lr_delay_mult=0.01, max_steps=20000)
         
         if iteration < opt.warm_up:
-            d_xyz, d_rotation, d_scaling, d_sigma_scaling = 0.0, 0.0, 0.0
+            d_xyz, d_rotation, d_scaling, d_sigma_scaling = 0.0, 0.0, 0.0, 0.0
             use_deform = False
         else:
             N = triangles.get_number_of_points

@@ -185,7 +185,7 @@ def render(viewpoint_camera, pc : TriangleModel, pipe, bg_color : torch.Tensor, 
     #     triangles_points = triangle_rotated + deformed_centroids.unsqueeze(1)  # [N, 3, 3]
     #     triangles_points = triangles_points.view(-1, 3).flatten(0)  # Flatten to [N*3, 3]
 
-    sigma *= d_sigma_scaling
+    # sigma *= d_sigma_scaling
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
