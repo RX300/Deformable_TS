@@ -41,7 +41,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
         latent_dim=dataset.latent_dim
     )
     deform.train_setting(opt)
-
+    print("Using DeformModel with AutoEncoder:", dataset.use_autoencoder)
+    print("DeformModel initialized with latent_dim:", dataset.latent_dim if dataset.use_autoencoder else "N/A")
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
 
