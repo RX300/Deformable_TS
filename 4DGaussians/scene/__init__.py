@@ -80,7 +80,7 @@ class Scene:
             print("add points.")
             # breakpoint()
             scene_info = scene_info._replace(point_cloud=add_points(scene_info.point_cloud, xyz_max=xyz_max, xyz_min=xyz_min))
-        self.gaussians._deformation.deformation_net.set_aabb(xyz_max,xyz_min)
+        #self.gaussians._deformation.deformation_net.set_aabb(xyz_max,xyz_min)
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
                                                            "point_cloud",

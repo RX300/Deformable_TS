@@ -54,36 +54,70 @@ class Embedder:
         return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
 
 
-class AutoEncoderDeformNetwork(nn.Module):
-    """完整的自编码器变形网络，与AEDeformable保持一致"""
-    def __init__(self, D=8, W=256, multires=10, latent_dim=64, is_blender=False):
-        super(AutoEncoderDeformNetwork, self).__init__()
+class GaussianEncoder(nn.Module):
+    """编码器：将高斯参数编码到潜在空间"""
+    def __init__(self, input_dim=10, latent_dim=64, hidden_dim=128):
+        super(GaussianEncoder, self).__init__()
+        # input_dim = 3 (xyz) + 4 (rotation) + 3 (scaling) = 10
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, latent_dim)
+        )
         
+    def forward(self, gaussian_params):
+        """
+        gaussian_params: [N, 10] 包含 xyz(3) + rotation(4) + scaling(3)
+        """
+        return self.encoder(gaussian_params)
+
+
+class GaussianDecoder(nn.Module):
+    """解码器：将潜在表示解码回高斯参数变化"""
+    def __init__(self, latent_dim=64, output_dim=10, hidden_dim=128):
+        super(GaussianDecoder, self).__init__()
+        # output_dim = 3 (d_xyz) + 4 (d_rotation) + 3 (d_scaling) = 10
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, output_dim)
+        )
+        
+    def forward(self, latent_code):
+        """
+        latent_code: [N, latent_dim]
+        return: [N, 10] 包含 d_xyz(3) + d_rotation(4) + d_scaling(3)
+        """
+        return self.decoder(latent_code)
+
+
+class LatentDeformNetwork(nn.Module):
+    """在潜在空间中进行时间变形的网络"""
+    def __init__(self, latent_dim=64, D=6, W=128, multires=6, is_blender=False):
+        super(LatentDeformNetwork, self).__init__()
+        self.latent_dim = latent_dim
         self.D = D
         self.W = W
-        self.latent_dim = latent_dim
-        self.is_blender = is_blender
         self.t_multires = 6 if is_blender else 10
         self.skips = [D // 2]
 
-        # 位置编码
-        self.embed_fn, self.xyz_input_ch = get_embedder(multires, 3)
-        # 时间编码
-        self.embed_time_fn, self.time_input_ch = get_embedder(self.t_multires, 1)
-        
-        # 输入维度 = 位置编码 + 时间编码
-        self.input_ch = self.xyz_input_ch + self.time_input_ch
+        self.embed_time_fn, time_input_ch = get_embedder(self.t_multires, 1)
+        self.input_ch = latent_dim + time_input_ch
 
         if is_blender:
             # Better for D-NeRF Dataset
             self.time_out = 30
             self.timenet = nn.Sequential(
-                nn.Linear(self.time_input_ch, 256), nn.ReLU(inplace=True),
-                nn.Linear(256, self.time_out))
+                nn.Linear(time_input_ch, 128), nn.ReLU(inplace=True),
+                nn.Linear(128, self.time_out))
 
             self.linear = nn.ModuleList(
-                [nn.Linear(self.xyz_input_ch + self.time_out, W)] + [
-                    nn.Linear(W, W) if i not in self.skips else nn.Linear(W + self.xyz_input_ch + self.time_out, W)
+                [nn.Linear(latent_dim + self.time_out, W)] + [
+                    nn.Linear(W, W) if i not in self.skips else nn.Linear(W + latent_dim + self.time_out, W)
                     for i in range(D - 1)]
             )
         else:
@@ -93,108 +127,148 @@ class AutoEncoderDeformNetwork(nn.Module):
                     for i in range(D - 1)]
             )
 
-        # 输出层，预测位置、旋转、缩放的变化
-        self.gaussian_warp = nn.Linear(W, 3)     # 位置变化
-        self.gaussian_rotation = nn.Linear(W, 4) # 旋转变化
-        self.gaussian_scaling = nn.Linear(W, 3)  # 缩放变化
-        
-    def forward(self, xyz, time_input):
+        self.is_blender = is_blender
+        self.output_layer = nn.Linear(W, latent_dim)
+
+    def forward(self, latent_code, t):
         """
-        xyz: [N, 3] 高斯中心点坐标
-        time_input: [N, 1] 时间输入
-        返回: d_xyz, d_rotation, d_scaling
+        latent_code: [N, latent_dim] 编码后的高斯参数
+        t: [N, 1] 时间输入
+        return: [N, latent_dim] 变形后的潜在表示
         """
-        # 位置编码
-        x_emb = self.embed_fn(xyz)
-        # 时间编码
-        t_emb = self.embed_time_fn(time_input)
-        
+        t_emb = self.embed_time_fn(t)
         if self.is_blender:
-            t_emb = self.timenet(t_emb)  # better for D-NeRF Dataset
-            h = torch.cat([x_emb, t_emb], dim=-1)
-        else:
-            h = torch.cat([x_emb, t_emb], dim=-1)
+            t_emb = self.timenet(t_emb)
         
-        # MLP前向传播
+        h = torch.cat([latent_code, t_emb], dim=-1)
+        
         for i, l in enumerate(self.linear):
             h = self.linear[i](h)
             h = F.relu(h)
             if i in self.skips:
                 if self.is_blender:
-                    h = torch.cat([x_emb, t_emb, h], -1)
+                    h = torch.cat([latent_code, t_emb, h], -1)
                 else:
-                    h = torch.cat([x_emb, t_emb, h], -1)
+                    h = torch.cat([latent_code, t_emb, h], -1)
 
-        # 输出变形参数
-        d_xyz = self.gaussian_warp(h)
-        d_rotation = self.gaussian_rotation(h)
-        d_scaling = self.gaussian_scaling(h)
+        delta_latent = self.output_layer(h)
+        return latent_code + delta_latent  # 残差连接
+
+
+class AutoEncoderDeformNetwork(nn.Module):
+    """自编码器变形网络：编码->变形->解码"""
+    def __init__(self, latent_dim=64, is_blender=False, is_6dof=False):
+        super(AutoEncoderDeformNetwork, self).__init__()
+        
+        self.latent_dim = latent_dim
+        self.is_6dof = is_6dof
+        
+        # 编码器：将高斯参数编码到潜在空间
+        self.encoder = GaussianEncoder(input_dim=10, latent_dim=latent_dim)
+        
+        # 潜在空间变形网络
+        self.latent_deform = LatentDeformNetwork(
+            latent_dim=latent_dim, 
+            is_blender=is_blender
+        )
+        
+        # 解码器：将潜在表示解码回参数变化
+        self.decoder = GaussianDecoder(latent_dim=latent_dim, output_dim=10)
+        
+        # 正则化项权重
+        self.recon_weight = 1.0
+        self.latent_reg_weight = 0.01
+        
+    def forward(self, xyz, rotation, scaling, t):
+        """
+        xyz: [N, 3] 高斯中心点坐标
+        rotation: [N, 4] 高斯旋转四元数
+        scaling: [N, 3] 高斯缩放参数
+        t: [N, 1] 时间输入
+        """
+        # 1. 将高斯参数拼接
+        gaussian_params = torch.cat([xyz, rotation, scaling], dim=-1)  # [N, 10]
+        
+        # 2. 编码到潜在空间
+        latent_code = self.encoder(gaussian_params)  # [N, latent_dim]
+        
+        # 3. 在潜在空间中进行时间变形
+        deformed_latent = self.latent_deform(latent_code, t)  # [N, latent_dim]
+        
+        # 4. 解码回参数变化
+        delta_params = self.decoder(deformed_latent)  # [N, 10]
+        
+        # 5. 分离出各个变化量
+        d_xyz = delta_params[:, :3]
+        d_rotation = delta_params[:, 3:7]
+        d_scaling = delta_params[:, 7:10]
         
         return d_xyz, d_rotation, d_scaling
+    
+    def compute_regularization_loss(self, xyz, rotation, scaling, t):
+        """计算正则化损失"""
+        # 1. 编码
+        gaussian_params = torch.cat([xyz, rotation, scaling], dim=-1)
+        latent_code = self.encoder(gaussian_params)
+        
+        # 2. 潜在空间正则化 - 鼓励潜在代码接近标准正态分布
+        latent_reg_loss = torch.mean(latent_code ** 2) * self.latent_reg_weight
+        
+        # 3. 重建损失 - 确保编码解码一致性
+        reconstructed_params = self.decoder(latent_code)
+        recon_loss = F.mse_loss(reconstructed_params, torch.zeros_like(reconstructed_params)) * self.recon_weight
+        
+        return latent_reg_loss + recon_loss
 
 
 class Deformation(nn.Module):
     def __init__(self, D=8, W=256, args=None):
-        super(Deformation, self).__init__()
+        super().__init__()
         self.D = D
         self.W = W
         self.args = args
-        
-        # 直接使用参数，不再做兼容性检查
         self.latent_dim = args.latent_dim
         self.is_blender = args.is_blender
         self.multires = args.multires
         
-        # 核心AutoEncoder变形网络
-        self.autoencoder_deform = AutoEncoderDeformNetwork(
-            D=D,
-            W=W,
-            multires=self.multires,
+        # 使用真正的AEDeformable风格的AutoEncoder网络
+        self.autoencoder = AutoEncoderDeformNetwork(
             latent_dim=self.latent_dim,
-            is_blender=self.is_blender
+            is_blender=self.is_blender,
+            is_6dof=False
         )
-        
-    def query_time(self, position, time_input):
-        """简化的时间查询接口"""
-        # 处理时间输入维度
-        if time_input.dim() == 1:
-            time_input = time_input.unsqueeze(-1)
-        elif time_input.shape[-1] > 1:
-            time_input = time_input[:, :1]
-        
-        # 直接通过AutoEncoder获取变形
-        return self.autoencoder_deform(position, time_input)
-        
-    def forward_dynamic(self, rays_pts_emb, scales_emb, rotations_emb, opacity_emb, shs_emb, time_emb):
-        """优化的动态变形"""
-        position = rays_pts_emb[:, :3]
-        
-        # 获取变形量
-        d_xyz, d_rotation, d_scaling = self.query_time(position, time_emb)
-        
-        # 应用变形 - 直接增量，不做条件判断
-        pts = position + d_xyz
-        scales = scales_emb[:, :3] + d_scaling
-        rotations = rotations_emb[:, :4] + d_rotation
-        
-        # opacity和shs直接透传
-        opacity = opacity_emb[:, :1]
-        shs = shs_emb
-        
-        return pts, scales, rotations, opacity, shs
-    
+
     def forward(self, rays_pts_emb, scales_emb, rotations_emb, opacity_emb, shs_emb, time_emb):
-        """简化的前向传播"""
-        return self.forward_dynamic(rays_pts_emb, scales_emb, rotations_emb, opacity_emb, shs_emb, time_emb)
-    
-    def get_mlp_parameters(self):
-        """获取所有网络参数"""
-        return list(self.autoencoder_deform.parameters())
+        # 提取xyz坐标和处理时间输入
+        xyz = rays_pts_emb
+        rotations = rotations_emb
+        scales = scales_emb
+        t = time_emb
         
+        # 确保时间维度正确
+        if t.dim() == 1:
+            t = t.unsqueeze(-1)
+        elif t.shape[-1] > 1:
+            t = t[:, :1]
+        
+        # 使用真正的AutoEncoder进行变形
+        d_xyz, d_rotation, d_scaling = self.autoencoder(xyz, rotations, scales, t)
+        
+        # 应用变形
+        pts = xyz + d_xyz
+        scales = scales_emb + d_scaling
+        rotations = rotations_emb + d_rotation
+        opacity = opacity_emb
+        shs = shs_emb
+        return pts, scales, rotations, opacity, shs
+
+    def get_mlp_parameters(self):
+        return list(self.autoencoder.parameters())
+
     def compute_regularization_loss(self):
-        """简化的正则化损失 - 基于网络权重"""
+        # 简化版本的正则化损失，兼容现有调用
         reg_loss = 0.0
-        for param in self.autoencoder_deform.parameters():
+        for param in self.autoencoder.parameters():
             reg_loss += torch.sum(param ** 2)
         return reg_loss * 1e-6
 class deform_network(nn.Module):
@@ -221,14 +295,7 @@ class deform_network(nn.Module):
 
     def forward(self, points, scales, rotations, opacity, shs, times):
         """简化的前向传播 - 直接处理原始参数"""
-        return self.deformation_net(
-            points.unsqueeze(1) if points.dim() == 2 else points,  # 确保维度正确
-            scales.unsqueeze(1) if scales.dim() == 2 else scales,
-            rotations.unsqueeze(1) if rotations.dim() == 2 else rotations,
-            opacity.unsqueeze(1) if opacity.dim() == 2 else opacity,
-            shs.unsqueeze(1) if shs.dim() == 2 else shs,
-            times
-        )
+        return self.deformation_net(points, scales, rotations, opacity, shs, times)
     
     def get_mlp_parameters(self):
         """获取MLP参数"""
@@ -237,4 +304,3 @@ class deform_network(nn.Module):
     def compute_regularization_loss(self):
         """计算正则化损失"""
         return self.deformation_net.compute_regularization_loss()
-
