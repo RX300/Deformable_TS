@@ -5,7 +5,7 @@ ModelHiddenParams = dict(
      'output_coordinate_dim': 16,
      'resolution': [64, 64, 64, 150]
     },
-    multires = [1,2],
+    multires = 10,
     defor_depth = 0,
     net_width = 128,
     plane_tv_weight = 0.0002,
