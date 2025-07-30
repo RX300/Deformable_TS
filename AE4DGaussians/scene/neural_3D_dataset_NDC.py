@@ -301,69 +301,101 @@ class Neural3D_NDC_Dataset(Dataset):
         render_poses = self.val_poses
         render_times = torch.linspace(0.0, 1.0, render_poses.shape[0]) * 2.0 - 1.0
         return render_poses, self.time_scale * render_times
-    def load_images_path(self,videos,split):
+    def load_images_path(self, videos, split):
         image_paths = []
         image_poses = []
         image_times = []
         N_cams = 0
         N_time = 0
         countss = 300
+        
+        # 收集需要处理的视频
+        videos_to_process = []
+        video_indices = []
+        
         for index, video_path in enumerate(videos):
-            
             if index == self.eval_index:
-                if split =="train":
+                if split == "train":
                     continue
             else:
                 if split == "test":
                     continue
-            N_cams +=1
-            count = 0
+            videos_to_process.append(video_path)
+            video_indices.append(index)
+            N_cams += 1
+
+        # 使用多线程处理视频提取图像
+        print(f"Processing {len(videos_to_process)} videos with multi-threading...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = []
+            for video_path in videos_to_process:
+                future = executor.submit(self._extract_images_from_video, video_path, countss)
+                futures.append(future)
+            
+            # 等待所有视频处理完成
+            concurrent.futures.wait(futures)
+        
+        # 收集图像路径和姿态信息
+        for i, (video_path, original_index) in enumerate(zip(videos_to_process, video_indices)):
             video_images_path = video_path.split('.')[0]
-            image_path = os.path.join(video_images_path,"images")
-            video_frames = cv2.VideoCapture(video_path)
-            if not os.path.exists(image_path):
-                print(f"no images saved in {image_path}, extract images from video.")
-                os.makedirs(image_path)
+            image_path = os.path.join(video_images_path, "images")
+            
+            if os.path.exists(image_path):
+                images_path = os.listdir(image_path)
+                images_path.sort()
                 this_count = 0
-                while video_frames.isOpened():
-                    ret, video_frame = video_frames.read()
-                    if this_count >= countss:break
-                    if ret:
-                        video_frame = cv2.cvtColor(video_frame, cv2.COLOR_BGR2RGB)
-                        video_frame = Image.fromarray(video_frame)
-                        if self.downsample != 1.0:
-
-                            img = video_frame.resize(self.img_wh, Image.LANCZOS)
-                        img.save(os.path.join(image_path,"%04d.png"%count))
-
-                        # img = transform(img)
-                        count += 1
-                        this_count+=1
-                    else:
+                
+                for idx, path in enumerate(images_path):
+                    if this_count >= countss:
                         break
-                    
-            images_path = os.listdir(image_path)
-            images_path.sort()
-            this_count = 0
-            for idx, path in enumerate(images_path):
-                if this_count >=countss:break
-                image_paths.append(os.path.join(image_path,path))
-                pose = np.array(self.poses_all[index])
-                R = pose[:3,:3]
-                R = -R
-                R[:,0] = -R[:,0]
-                T = -pose[:3,3].dot(R)
-                image_times.append(idx/countss)
-                image_poses.append((R,T))
-                # if self.downsample != 1.0:
-                #     img = video_frame.resize(self.img_wh, Image.LANCZOS)
-                # img.save(os.path.join(image_path,"%04d.png"%count))
-                this_count+=1
-            N_time = len(images_path)
-
-                #     video_data_save[count] = img.permute(1,2,0)
-                #     count += 1
+                    image_paths.append(os.path.join(image_path, path))
+                    pose = np.array(self.poses_all[original_index])
+                    R = pose[:3, :3]
+                    R = -R
+                    R[:, 0] = -R[:, 0]
+                    T = -pose[:3, 3].dot(R)
+                    image_times.append(idx / countss)
+                    image_poses.append((R, T))
+                    this_count += 1
+                
+                N_time = len(images_path)
+        
         return image_paths, image_poses, image_times, N_cams, N_time
+    
+    def _extract_images_from_video(self, video_path, max_frames):
+        """辅助函数：从单个视频中提取图像"""
+        video_images_path = video_path.split('.')[0]
+        image_path = os.path.join(video_images_path, "images")
+        
+        if not os.path.exists(image_path):
+            print(f"Extracting images from {video_path} to {image_path}")
+            os.makedirs(image_path)
+            
+            video_frames = cv2.VideoCapture(video_path)
+            count = 0
+            this_count = 0
+            
+            while video_frames.isOpened() and this_count < max_frames:
+                ret, video_frame = video_frames.read()
+                if ret:
+                    video_frame = cv2.cvtColor(video_frame, cv2.COLOR_BGR2RGB)
+                    video_frame = Image.fromarray(video_frame)
+                    
+                    if self.downsample != 1.0:
+                        img = video_frame.resize(self.img_wh, Image.LANCZOS)
+                    else:
+                        img = video_frame
+                    
+                    img.save(os.path.join(image_path, "%04d.png" % count))
+                    count += 1
+                    this_count += 1
+                else:
+                    break
+            
+            video_frames.release()
+            print(f"Extracted {count} frames from {video_path}")
+        else:
+            print(f"Images already exist in {image_path}, skipping extraction")
     def __len__(self):
         return len(self.image_paths)
     def __getitem__(self,index):
