@@ -81,14 +81,21 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     deformation_point = pc._deformation_table
     if "coarse" in stage:
         means3D_final, scales_final, rotations_final, opacity_final, shs_final = means3D, scales, rotations, opacity, shs
+        static_weights = None
     elif "fine" in stage:
-        # time0 = get_time()
-        # means3D_deform, scales_deform, rotations_deform, opacity_deform = pc._deformation(means3D[deformation_point], scales[deformation_point], 
-        #                                                                  rotations[deformation_point], opacity[deformation_point],
-        #                                                                  time[deformation_point])
-        means3D_final, scales_final, rotations_final, opacity_final, shs_final = pc._deformation(means3D, scales, 
-                                                                 rotations, opacity, shs,
-                                                                 time)
+        # Use the new static/dynamic separated rendering method
+        if hasattr(pc, 'get_deformed_attributes'):
+            # Get separated and combined attributes
+            means3D_final, scales_final, rotations_final, opacity_final, shs_final, classification_probs = pc.get_deformed_attributes(
+                means3D, scales, rotations, opacity, shs, time
+            )
+            static_weights = classification_probs  # For compatibility/logging
+        else:
+            # Fallback to original deformation method
+            means3D_final, scales_final, rotations_final, opacity_final, shs_final = pc._deformation(means3D, scales, 
+                                                                     rotations, opacity, shs,
+                                                                     time)
+            static_weights = None
     else:
         raise NotImplementedError
 
@@ -138,5 +145,6 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             "viewspace_points": screenspace_points,
             "visibility_filter" : radii > 0,
             "radii": radii,
-            "depth":depth}
+            "depth":depth,
+            "static_weights": static_weights}
 

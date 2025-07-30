@@ -24,6 +24,42 @@ from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scene.deformation import deform_network
 from scene.regulation import compute_plane_smoothness
+
+class StaticDynamicClassifier(nn.Module):
+    """Encoder-Decoder network to classify each Gaussian as static (0) or dynamic (1)"""
+    def __init__(self, input_dim=3, hidden_dim=128, latent_dim=64):
+        super().__init__()
+        
+        # Encoder: 3D position -> latent representation
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, latent_dim),
+            nn.ReLU()
+        )
+        
+        # Decoder: latent -> binary classification
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 4, 1),
+            nn.Sigmoid()  # Output between 0 (static) and 1 (dynamic)
+        )
+    
+    def forward(self, xyz):
+        latent = self.encoder(xyz)
+        classification = self.decoder(latent)
+        return classification
+    
+    def get_binary_classification(self, xyz, threshold=0.5):
+        """Get hard binary classification (0 or 1)"""
+        classification = self.forward(xyz)
+        return (classification > threshold).float()
+
 class GaussianModel:
 
     def setup_functions(self):
@@ -49,6 +85,7 @@ class GaussianModel:
         self.max_sh_degree = sh_degree  
         self._xyz = torch.empty(0)
         self._deformation = deform_network(args)
+        self._static_dynamic_classifier = StaticDynamicClassifier()
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
         self._scaling = torch.empty(0)
@@ -68,6 +105,7 @@ class GaussianModel:
             self.active_sh_degree,
             self._xyz,
             self._deformation.state_dict(),
+            self._static_dynamic_classifier.state_dict(),
             self._deformation_table,
             # self.grid,
             self._features_dc,
@@ -86,6 +124,7 @@ class GaussianModel:
         (self.active_sh_degree, 
         self._xyz, 
         deform_state,
+        static_dynamic_state,
         self._deformation_table,
         
         # self.grid,
@@ -100,6 +139,7 @@ class GaussianModel:
         opt_dict, 
         self.spatial_lr_scale) = model_args
         self._deformation.load_state_dict(deform_state)
+        self._static_dynamic_classifier.load_state_dict(static_dynamic_state)
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
@@ -130,6 +170,142 @@ class GaussianModel:
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
+    def get_static_dynamic_classification(self, threshold=0.5):
+        """Get binary classification for each Gaussian (0=static, 1=dynamic)"""
+        return self._static_dynamic_classifier.get_binary_classification(self._xyz, threshold)
+
+    def get_static_dynamic_probabilities(self):
+        """Get soft probabilities for static/dynamic classification"""
+        return self._static_dynamic_classifier(self._xyz)
+
+    def get_separated_attributes(self, means3D, scales, rotations, opacity, shs, times, threshold=0.5):
+        """
+        Get separated static and dynamic attributes for rendering
+        Returns:
+        - static_xyz, static_scales, static_rotations, static_opacity, static_shs: static Gaussian attributes
+        - dynamic_xyz, dynamic_scales, dynamic_rotations, dynamic_opacity, dynamic_shs: dynamic Gaussian attributes  
+        - static_mask: boolean mask indicating which Gaussians are static
+        - dynamic_mask: boolean mask indicating which Gaussians are dynamic
+        """
+        # Get binary classification (0=static, 1=dynamic)
+        classification = self.get_static_dynamic_classification(threshold)  # [N, 1]
+        
+        # Create masks
+        dynamic_mask = (classification > 0.5).squeeze()  # [N] boolean
+        static_mask = ~dynamic_mask  # [N] boolean
+        
+        # Static Gaussians: use original attributes unchanged
+        static_xyz = means3D[static_mask] if static_mask.any() else torch.empty(0, 3, device=means3D.device)
+        static_scales = scales[static_mask] if static_mask.any() else torch.empty(0, scales.shape[-1], device=scales.device)
+        static_rotations = rotations[static_mask] if static_mask.any() else torch.empty(0, rotations.shape[-1], device=rotations.device)
+        static_opacity = opacity[static_mask] if static_mask.any() else torch.empty(0, opacity.shape[-1], device=opacity.device)
+        static_shs = shs[static_mask] if static_mask.any() else torch.empty(0, *shs.shape[1:], device=shs.device)  # Fix: handle full SH shape
+        
+        # Dynamic Gaussians: apply deformation
+        if dynamic_mask.any():
+            try:
+                # Apply deformation only to dynamic Gaussians
+                dynamic_means3D = means3D[dynamic_mask]
+                dynamic_scales_orig = scales[dynamic_mask]
+                dynamic_rotations_orig = rotations[dynamic_mask]
+                dynamic_opacity_orig = opacity[dynamic_mask]
+                dynamic_shs_orig = shs[dynamic_mask]
+                dynamic_times = times[dynamic_mask]
+                
+                deformed_results = self._deformation(
+                    dynamic_means3D, dynamic_scales_orig, dynamic_rotations_orig, 
+                    dynamic_opacity_orig, dynamic_shs_orig, dynamic_times
+                )
+                
+                if len(deformed_results) == 5:
+                    dynamic_xyz, dynamic_scales, dynamic_rotations, dynamic_opacity, dynamic_shs = deformed_results
+                else:
+                    dynamic_xyz, dynamic_scales, dynamic_rotations, dynamic_opacity = deformed_results[:4]
+                    dynamic_shs = dynamic_shs_orig
+                    
+            except Exception as e:
+                print(f"Warning: Deformation failed for dynamic Gaussians: {e}")
+                # Fallback to original attributes for dynamic Gaussians
+                dynamic_xyz = means3D[dynamic_mask]
+                dynamic_scales = scales[dynamic_mask]
+                dynamic_rotations = rotations[dynamic_mask]
+                dynamic_opacity = opacity[dynamic_mask]
+                dynamic_shs = shs[dynamic_mask]
+        else:
+            # No dynamic Gaussians
+            dynamic_xyz = torch.empty(0, 3, device=means3D.device)
+            dynamic_scales = torch.empty(0, scales.shape[-1], device=scales.device)
+            dynamic_rotations = torch.empty(0, rotations.shape[-1], device=rotations.device)
+            dynamic_opacity = torch.empty(0, opacity.shape[-1], device=opacity.device)
+            dynamic_shs = torch.empty(0, *shs.shape[1:], device=shs.device)  # Fix: handle full SH shape
+        
+        return (static_xyz, static_scales, static_rotations, static_opacity, static_shs,
+                dynamic_xyz, dynamic_scales, dynamic_rotations, dynamic_opacity, dynamic_shs,
+                static_mask, dynamic_mask)
+
+    def combine_static_dynamic_attributes(self, 
+                                        static_xyz, static_scales, static_rotations, static_opacity, static_shs,
+                                        dynamic_xyz, dynamic_scales, dynamic_rotations, dynamic_opacity, dynamic_shs,
+                                        static_mask, dynamic_mask):
+        """
+        Combine static and dynamic attributes back into full tensors for rendering
+        """
+        total_points = static_mask.shape[0]
+        device = static_mask.device
+        
+        # Initialize combined tensors
+        combined_xyz = torch.zeros(total_points, 3, device=device, dtype=static_xyz.dtype if static_xyz.numel() > 0 else dynamic_xyz.dtype)
+        combined_scales = torch.zeros(total_points, static_scales.shape[-1] if static_scales.numel() > 0 else dynamic_scales.shape[-1], device=device)
+        combined_rotations = torch.zeros(total_points, static_rotations.shape[-1] if static_rotations.numel() > 0 else dynamic_rotations.shape[-1], device=device)
+        combined_opacity = torch.zeros(total_points, static_opacity.shape[-1] if static_opacity.numel() > 0 else dynamic_opacity.shape[-1], device=device)
+        
+        # Fix SHs shape: need to handle 3D shape [N, num_features, 3]
+        if static_shs.numel() > 0:
+            shs_shape = static_shs.shape[1:]  # Get [num_features, 3]
+        else:
+            shs_shape = dynamic_shs.shape[1:]  # Get [num_features, 3]
+        combined_shs = torch.zeros(total_points, *shs_shape, device=device)
+        
+        # Fill in static Gaussians
+        if static_mask.any():
+            combined_xyz[static_mask] = static_xyz
+            combined_scales[static_mask] = static_scales
+            combined_rotations[static_mask] = static_rotations
+            combined_opacity[static_mask] = static_opacity
+            combined_shs[static_mask] = static_shs
+        
+        # Fill in dynamic Gaussians
+        if dynamic_mask.any():
+            combined_xyz[dynamic_mask] = dynamic_xyz
+            combined_scales[dynamic_mask] = dynamic_scales
+            combined_rotations[dynamic_mask] = dynamic_rotations
+            combined_opacity[dynamic_mask] = dynamic_opacity
+            combined_shs[dynamic_mask] = dynamic_shs
+        
+        return combined_xyz, combined_scales, combined_rotations, combined_opacity, combined_shs
+
+    def get_deformed_attributes(self, means3D, scales, rotations, opacity, shs, times, threshold=0.5):
+        """
+        Main method for static/dynamic separated rendering
+        Returns final combined attributes and classification info
+        """
+        # Get separated static and dynamic attributes
+        (static_xyz, static_scales, static_rotations, static_opacity, static_shs,
+         dynamic_xyz, dynamic_scales, dynamic_rotations, dynamic_opacity, dynamic_shs,
+         static_mask, dynamic_mask) = self.get_separated_attributes(
+            means3D, scales, rotations, opacity, shs, times, threshold)
+        
+        # Combine back into full tensors
+        final_xyz, final_scales, final_rotations, final_opacity, final_shs = self.combine_static_dynamic_attributes(
+            static_xyz, static_scales, static_rotations, static_opacity, static_shs,
+            dynamic_xyz, dynamic_scales, dynamic_rotations, dynamic_opacity, dynamic_shs,
+            static_mask, dynamic_mask)
+        
+        # Get classification probabilities for analysis/logging
+        classification_probs = self.get_static_dynamic_probabilities()
+        
+        return final_xyz, final_scales, final_rotations, final_opacity, final_shs, classification_probs
+
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
@@ -154,6 +330,7 @@ class GaussianModel:
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._deformation = self._deformation.to("cuda") 
+        self._static_dynamic_classifier = self._static_dynamic_classifier.to("cuda")
         # self.grid = self.grid.to("cuda")
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
@@ -172,6 +349,7 @@ class GaussianModel:
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
             {'params': list(self._deformation.get_mlp_parameters()), 'lr': training_args.deformation_lr_init * self.spatial_lr_scale, "name": "deformation"},
+            {'params': list(self._static_dynamic_classifier.parameters()), 'lr': training_args.deformation_lr_init * self.spatial_lr_scale, "name": "static_dynamic_classifier"},
            # {'params': list(self._deformation.get_grid_parameters()), 'lr': training_args.grid_lr_init * self.spatial_lr_scale, "name": "grid"},
             {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
@@ -210,6 +388,9 @@ class GaussianModel:
                 lr = self.deformation_scheduler_args(iteration)
                 param_group['lr'] = lr
                 # return lr
+            elif param_group["name"] == "static_dynamic_classifier":
+                lr = self.deformation_scheduler_args(iteration)  # Use same schedule as deformation
+                param_group['lr'] = lr
 
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
@@ -235,6 +416,14 @@ class GaussianModel:
         weight_dict = torch.load(os.path.join(path,"deformation.pth"),map_location="cuda")
         self._deformation.load_state_dict(weight_dict)
         self._deformation = self._deformation.to("cuda")
+        
+        # Load static/dynamic classifier if exists
+        static_dynamic_path = os.path.join(path, "static_dynamic_classifier.pth")
+        if os.path.exists(static_dynamic_path):
+            static_dynamic_dict = torch.load(static_dynamic_path, map_location="cuda")
+            self._static_dynamic_classifier.load_state_dict(static_dynamic_dict)
+        self._static_dynamic_classifier = self._static_dynamic_classifier.to("cuda")
+        
         self._deformation_table = torch.gt(torch.ones((self.get_xyz.shape[0]),device="cuda"),0)
         self._deformation_accum = torch.zeros((self.get_xyz.shape[0],3),device="cuda")
         if os.path.exists(os.path.join(path, "deformation_table.pth")):
@@ -245,6 +434,7 @@ class GaussianModel:
         # print(self._deformation.deformation_net.grid.)
     def save_deformation(self, path):
         torch.save(self._deformation.state_dict(),os.path.join(path, "deformation.pth"))
+        torch.save(self._static_dynamic_classifier.state_dict(), os.path.join(path, "static_dynamic_classifier.pth"))
         torch.save(self._deformation_table,os.path.join(path, "deformation_table.pth"))
         torch.save(self._deformation_accum,os.path.join(path, "deformation_accum.pth"))
     def save_ply(self, path):
@@ -581,3 +771,30 @@ class GaussianModel:
         else:
             # 原始的HexPlane架构
             return plane_tv_weight * self._plane_regulation() + time_smoothness_weight * self._time_regulation() + l1_time_planes_weight * self._l1_regulation()
+    
+    def get_static_dynamic_stats(self, threshold=0.5):
+        """Get statistics about static/dynamic classification"""
+        with torch.no_grad():
+            classification_probs = self.get_static_dynamic_probabilities()
+            binary_classification = self.get_static_dynamic_classification(threshold)
+            
+            # Count statistics
+            static_count = (binary_classification < 0.5).sum().item()
+            dynamic_count = (binary_classification > 0.5).sum().item()
+            total_points = binary_classification.shape[0]
+            
+            # Average probabilities
+            avg_static_prob = (1 - classification_probs).mean().item()
+            avg_dynamic_prob = classification_probs.mean().item()
+            
+            return {
+                'static_count': static_count,
+                'dynamic_count': dynamic_count,
+                'total_points': total_points,
+                'static_ratio': static_count / total_points,
+                'dynamic_ratio': dynamic_count / total_points,
+                'avg_static_prob': avg_static_prob,
+                'avg_dynamic_prob': avg_dynamic_prob,
+                'classification_entropy': -(classification_probs * torch.log(classification_probs + 1e-8) + 
+                                         (1 - classification_probs) * torch.log(1 - classification_probs + 1e-8)).mean().item()
+            }
