@@ -764,12 +764,12 @@ class GaussianModel:
                 total += torch.abs(1 - grids[grid_id]).mean()
         return total
     def compute_regulation(self, time_smoothness_weight, l1_time_planes_weight, plane_tv_weight):
-        # ¼ì²éÊÇ·ñÊ¹ÓÃ±àÂëÆ÷-½âÂëÆ÷¼Ü¹¹
+        # æ£€æŸ¥æ˜¯å¦ä½¿ç”¨ç¼–ç å™¨-è§£ç å™¨æ¶æ„
         if hasattr(self._deformation.deformation_net, 'encoder'):
-            # ±àÂëÆ÷-½âÂëÆ÷¼Ü¹¹Ê¹ÓÃ²»Í¬µÄÕıÔò»¯
-            return 0.0  # ±àÂëÆ÷-½âÂëÆ÷µÄÕıÔò»¯ÔÚÑµÁ·Ñ­»·ÖĞµ¥¶À´¦Àí
+            # ç¼–ç å™¨-è§£ç å™¨æ¶æ„ä½¿ç”¨ä¸åŒçš„æ­£åˆ™åŒ–
+            return 0.0  # ç¼–ç å™¨-è§£ç å™¨çš„æ­£åˆ™åŒ–åœ¨è®­ç»ƒå¾ªç¯ä¸­å•ç‹¬å¤„ç†
         else:
-            # Ô­Ê¼µÄHexPlane¼Ü¹¹
+            # åŸå§‹çš„HexPlaneæ¶æ„
             return plane_tv_weight * self._plane_regulation() + time_smoothness_weight * self._time_regulation() + l1_time_planes_weight * self._l1_regulation()
     
     def get_static_dynamic_stats(self, threshold=0.5):
