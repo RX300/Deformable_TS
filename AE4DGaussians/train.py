@@ -203,10 +203,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         
         loss = Ll1
         
-        # AutoEncoder正则化损失 - 简化版本
-        if stage == "fine":
-            autoencoder_reg_loss = gaussians._deformation.compute_regularization_loss()
-            loss += autoencoder_reg_loss * hyper.latent_reg_weight
+        # # AutoEncoder正则化损失 - 简化版本
+        # if stage == "fine":
+        #     autoencoder_reg_loss = gaussians._deformation.compute_regularization_loss()
+        #     loss += autoencoder_reg_loss * hyper.latent_reg_weight
             
         # SSIM损失
         if opt.lambda_dssim != 0:

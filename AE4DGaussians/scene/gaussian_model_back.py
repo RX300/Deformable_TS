@@ -22,7 +22,7 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
-from scene.deformation import deform_network, deform_embeddingnetwork
+from scene.deformation import deform_network
 from scene.regulation import compute_plane_smoothness
 
 class StaticDynamicClassifier(nn.Module):
@@ -84,14 +84,13 @@ class GaussianModel:
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
         self._xyz = torch.empty(0)
-        self._deformation = deform_embeddingnetwork(args)
+        self._deformation = deform_network(args)
         self._static_dynamic_classifier = StaticDynamicClassifier()
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
-        self._embedding = torch.empty(0) 
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
@@ -114,7 +113,6 @@ class GaussianModel:
             self._scaling,
             self._rotation,
             self._opacity,
-            self._embedding,
             self.max_radii2D,
             self.xyz_gradient_accum,
             self.denom,
@@ -135,7 +133,6 @@ class GaussianModel:
         self._scaling, 
         self._rotation, 
         self._opacity,
-        self._embedding,
         self.max_radii2D, 
         xyz_gradient_accum, 
         denom,
@@ -169,10 +166,6 @@ class GaussianModel:
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
-    
-    @property
-    def get_embedding(self):
-        return self._embedding
     
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
@@ -334,7 +327,6 @@ class GaussianModel:
         rots[:, 0] = 1
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
-        embedding = torch.zeros((fused_color.shape[0], self._deformation.gaussian_embedding_dim)).float().cuda()  # [jm]
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._deformation = self._deformation.to("cuda") 
@@ -345,7 +337,6 @@ class GaussianModel:
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
-        self._embedding = nn.Parameter(embedding.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self._deformation_table = torch.gt(torch.ones((self.get_xyz.shape[0]),device="cuda"),0)
     def training_setup(self, training_args):
@@ -364,9 +355,8 @@ class GaussianModel:
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
-            {'params': [self._embedding], 'lr': training_args.feature_lr, "name": "embedding"}
-
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+            
         ]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -414,8 +404,6 @@ class GaussianModel:
             l.append('scale_{}'.format(i))
         for i in range(self._rotation.shape[1]):
             l.append('rot_{}'.format(i))
-        for i in range(self._embedding.shape[1]):
-            l.append('embedding_{}'.format(i))
         return l
     def compute_deformation(self,time):
         
@@ -459,12 +447,11 @@ class GaussianModel:
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
-        embedding = self._embedding.detach().cpu().numpy()
-
+        
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, embedding), axis=1)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
@@ -508,19 +495,12 @@ class GaussianModel:
         for idx, attr_name in enumerate(rot_names):
             rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
-        embedding_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("embedding")]
-        embedding_names = sorted(embedding_names, key = lambda x: int(x.split('_')[-1]))
-        embeddings = np.zeros((xyz.shape[0], len(embedding_names)))
-        for idx, attr_name in enumerate(embedding_names):
-            embeddings[:, idx] = np.asarray(plydata.elements[0][attr_name])
-
         self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
         self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
-        self._embedding = nn.Parameter(torch.tensor(embeddings, dtype=torch.float, device="cuda").requires_grad_(True))
         self.active_sh_degree = self.max_sh_degree
 
     def replace_tensor_to_optimizer(self, tensor, name):
@@ -568,7 +548,6 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
-        self._embedding = optimizable_tensors["embedding"]
         self._deformation_accum = self._deformation_accum[valid_points_mask]
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
         self._deformation_table = self._deformation_table[valid_points_mask]
@@ -598,14 +577,13 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_deformation_table,new_embedding):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_deformation_table):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
         "opacity": new_opacities,
         "scaling" : new_scaling,
         "rotation" : new_rotation,
-        "embedding" : new_embedding,
         # "deformation": new_deformation
        }
 
@@ -616,7 +594,6 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
-        self._embedding = optimizable_tensors["embedding"]
         # self._deformation = optimizable_tensors["deformation"]
         
         self._deformation_table = torch.cat([self._deformation_table,new_deformation_table],-1)
@@ -647,9 +624,8 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
-        new_embedding = self._embedding[selected_pts_mask].repeat(N,1)
         new_deformation_table = self._deformation_table[selected_pts_mask].repeat(N)
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_deformation_table,new_embedding)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_deformation_table)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -666,9 +642,8 @@ class GaussianModel:
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
-        new_embedding = self._embedding[selected_pts_mask]
         new_deformation_table = self._deformation_table[selected_pts_mask]
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_deformation_table, new_embedding)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_deformation_table)
 
     @property
     def get_aabb(self):
@@ -789,12 +764,12 @@ class GaussianModel:
                 total += torch.abs(1 - grids[grid_id]).mean()
         return total
     def compute_regulation(self, time_smoothness_weight, l1_time_planes_weight, plane_tv_weight):
-        # æ£€æŸ¥æ˜¯å¦ä½¿ç”¨ç¼–ç å™¨-è§£ç å™¨æ¶æ„
+        # ¼ì²éÊÇ·ñÊ¹ÓÃ±àÂëÆ÷-½âÂëÆ÷¼Ü¹¹
         if hasattr(self._deformation.deformation_net, 'encoder'):
-            # ç¼–ç å™¨-è§£ç å™¨æ¶æ„ä½¿ç”¨ä¸åŒçš„æ­£åˆ™åŒ–
-            return 0.0  # ç¼–ç å™¨-è§£ç å™¨çš„æ­£åˆ™åŒ–åœ¨è®­ç»ƒå¾ªç¯ä¸­å•ç‹¬å¤„ç†
+            # ±àÂëÆ÷-½âÂëÆ÷¼Ü¹¹Ê¹ÓÃ²»Í¬µÄÕıÔò»¯
+            return 0.0  # ±àÂëÆ÷-½âÂëÆ÷µÄÕıÔò»¯ÔÚÑµÁ·Ñ­»·ÖĞµ¥¶À´¦Àí
         else:
-            # åŸå§‹çš„HexPlaneæ¶æ„
+            # Ô­Ê¼µÄHexPlane¼Ü¹¹
             return plane_tv_weight * self._plane_regulation() + time_smoothness_weight * self._time_regulation() + l1_time_planes_weight * self._l1_regulation()
     
     def get_static_dynamic_stats(self, threshold=0.5):

@@ -79,6 +79,26 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         scales = pc._scaling
         rotations = pc._rotation
     deformation_point = pc._deformation_table
+    # if "coarse" in stage:
+    #     means3D_final, scales_final, rotations_final, opacity_final, shs_final = means3D, scales, rotations, opacity, shs
+    #     static_weights = None
+    # elif "fine" in stage:
+    #     # Use the new static/dynamic separated rendering method
+    #     if hasattr(pc, 'get_deformed_attributes'):
+    #         # Get separated and combined attributes
+    #         means3D_final, scales_final, rotations_final, opacity_final, shs_final, classification_probs = pc.get_deformed_attributes(
+    #             means3D, scales, rotations, opacity, shs, time
+    #         )
+    #         static_weights = classification_probs  # For compatibility/logging
+    #     else:
+    #         # Fallback to original deformation method
+    #         means3D_final, scales_final, rotations_final, opacity_final, shs_final = pc._deformation(means3D, scales, 
+    #                                                                  rotations, opacity, shs,
+    #                                                                  time)
+    #         static_weights = None
+    # else:
+    #     raise NotImplementedError
+
     if "coarse" in stage:
         means3D_final, scales_final, rotations_final, opacity_final, shs_final = means3D, scales, rotations, opacity, shs
         static_weights = None
@@ -86,10 +106,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         # Use the new static/dynamic separated rendering method
         if hasattr(pc, 'get_deformed_attributes'):
             # Get separated and combined attributes
-            means3D_final, scales_final, rotations_final, opacity_final, shs_final, classification_probs = pc.get_deformed_attributes(
-                means3D, scales, rotations, opacity, shs, time
-            )
-            static_weights = classification_probs  # For compatibility/logging
+            means3D_final, scales_final, rotations_final, opacity_final, shs_final = means3D, scales, rotations, opacity, shs
         else:
             # Fallback to original deformation method
             means3D_final, scales_final, rotations_final, opacity_final, shs_final = pc._deformation(means3D, scales, 
@@ -98,7 +115,6 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             static_weights = None
     else:
         raise NotImplementedError
-
 
 
     # time2 = get_time()
