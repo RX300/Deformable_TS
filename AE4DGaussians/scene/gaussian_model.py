@@ -84,7 +84,7 @@ class GaussianModel:
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
         self._xyz = torch.empty(0)
-        self._deformation = deform_embeddingnetwork(args)
+        self._deformation = deform_embeddingnetwork(args=args)
         self._static_dynamic_classifier = StaticDynamicClassifier()
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)

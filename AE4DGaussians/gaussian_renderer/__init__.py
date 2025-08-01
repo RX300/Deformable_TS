@@ -104,15 +104,10 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         static_weights = None
     elif "fine" in stage:
         # Use the new static/dynamic separated rendering method
-        if hasattr(pc, 'get_deformed_attributes'):
-            # Get separated and combined attributes
-            means3D_final, scales_final, rotations_final, opacity_final, shs_final = means3D, scales, rotations, opacity, shs
-        else:
-            # Fallback to original deformation method
-            means3D_final, scales_final, rotations_final, opacity_final, shs_final = pc._deformation(means3D, scales, 
-                                                                     rotations, opacity, shs,
-                                                                     time)
-            static_weights = None
+        # Fallback to original deformation method
+        means3D_final, scales_final, rotations_final, opacity_final, shs_final = pc._deformation(means3D, pc.get_embedding, scales, 
+                                                                    rotations, opacity, shs, time)
+        static_weights = None
     else:
         raise NotImplementedError
 

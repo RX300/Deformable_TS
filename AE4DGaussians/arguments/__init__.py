@@ -76,7 +76,7 @@ class ModelHiddenParams(ParamGroup):
         # 核心网络参数
         self.net_width = 256         # AutoEncoder网络宽度
         self.defor_depth = 8         # AutoEncoder网络深度
-        
+        self.embedding_dim = 32      # 嵌入维度   
         # AutoEncoder核心参数
         self.latent_dim = 64          # 潜在空间维度
         self.multires = 10            # 位置编码频率数量

@@ -369,12 +369,13 @@ class EmbeddingDeformNetwork(nn.Module):
 
 class deform_embeddingnetwork(nn.Module):
     def __init__(self, D=8, W=256, args=None):
+        super(deform_embeddingnetwork, self).__init__()
         self.D = D
         self.W = W
         self.args = args
         self.embedding_dim = args.embedding_dim
         self.is_blender = args.is_blender
-        self.is_6dof = args.is_6dof
+        #self.is_6dof = args.is_6dof
         
         self.embedding_deform = EmbeddingDeformNetwork(
             embedding_dim=self.embedding_dim,
@@ -389,6 +390,10 @@ class deform_embeddingnetwork(nn.Module):
         self.deform_rotation_network = self.create_network(W, 4, W)
         self.deform_opacity_network = self.create_network(W, 1, W)
         #self.deform_rgb_network = self.create_network(W, 3, W)
+
+    @property
+    def gaussian_embedding_dim(self):
+        return self.embedding_dim
 
     def create_network(self, input_ch,output_ch,hidden_dim):
         """创建输出网络"""
