@@ -62,10 +62,10 @@ class GaussianEncoder(nn.Module):
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
             nn.Linear(hidden_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
             nn.Linear(hidden_dim, latent_dim)
         )
         
@@ -84,10 +84,10 @@ class GaussianDecoder(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
             nn.Linear(hidden_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
             nn.Linear(hidden_dim, output_dim)
         )
         
@@ -109,14 +109,15 @@ class LatentDeformNetwork(nn.Module):
         self.t_multires = 6 if is_blender else 10
         self.skips = [D // 2]
 
-        self.embed_time_fn, time_input_ch = get_embedder(self.t_multires, 1)
+        self.embed_time_fn, time_input_ch = get_embedder(10, 1)
+        self
         self.input_ch = latent_dim + time_input_ch
 
         if is_blender:
             # Better for D-NeRF Dataset
             self.time_out = 30
             self.timenet = nn.Sequential(
-                nn.Linear(time_input_ch, 128), nn.ReLU(inplace=True),
+                nn.Linear(time_input_ch, 128), nn.LeakyReLU(inplace=True),
                 nn.Linear(128, self.time_out))
 
             self.linear = nn.ModuleList(
@@ -322,12 +323,12 @@ class EmbeddingDeformNetwork(nn.Module):
 
         self.embed_time_fn, time_input_ch = get_embedder(self.t_multires, 1)
         self.input_ch = embedding_dim + time_input_ch
-
+        
         if is_blender:
             # Better for D-NeRF Dataset
             self.time_out = 30
             self.timenet = nn.Sequential(
-                nn.Linear(time_input_ch, 128), nn.ReLU(inplace=True),
+                nn.Linear(time_input_ch, 128), nn.LeakyReLU(inplace=True),
                 nn.Linear(128, self.time_out))
 
             self.linear = nn.ModuleList(
@@ -367,6 +368,9 @@ class EmbeddingDeformNetwork(nn.Module):
         output_embeddings = h  # [N, W]
         return output_embeddings
 
+
+
+
 class deform_embeddingnetwork(nn.Module):
     def __init__(self, D=8, W=256, args=None):
         super(deform_embeddingnetwork, self).__init__()
@@ -377,18 +381,24 @@ class deform_embeddingnetwork(nn.Module):
         self.is_blender = args.is_blender
         #self.is_6dof = args.is_6dof
         
-        self.embedding_deform = EmbeddingDeformNetwork(
-            embedding_dim=self.embedding_dim,
-            output_dim=10,  # 输出维度为10，包含d_xyz(3) + d_rotation(4) + d_scaling(3)
-            D=self.D,
-            W=self.W,
-            is_blender=self.is_blender
-        )
+        # self.embedding_deform = EmbeddingDeformNetwork(
+        #     embedding_dim=self.embedding_dim,
+        #     output_dim=10,  # 输出维度为10，包含d_xyz(3) + d_rotation(4) + d_scaling(3)
+        #     D=self.D,
+        #     W=self.W,
+        #     is_blender=self.is_blender
+        # )
 
-        self.deform_pos_network = self.create_network(W, 3, W)
-        self.deform_scale_network = self.create_network(W, 3, W)
-        self.deform_rotation_network = self.create_network(W, 4, W)
-        self.deform_opacity_network = self.create_network(W, 1, W)
+        self.posenc_pos_fn, self.posenc_pos_dim = get_embedder(10, 3)
+        self.posenc_time_fn, self.posenc_time_dim = get_embedder(10, 1)
+        self.deform_pos_network = self.create_residual_network(self.embedding_dim+self.posenc_time_dim + self.posenc_pos_dim, 3, W)
+        self.deform_scale_network = self.create_residual_network(self.embedding_dim+self.posenc_time_dim, 3, W)
+        self.deform_rotation_network = self.create_residual_network(self.embedding_dim+self.posenc_time_dim, 4, W)
+        self.deform_opacity_network = self.create_residual_network(self.embedding_dim+self.posenc_time_dim, 1, W)
+        # self.deform_pos_network = self.create_network(self.embedding_dim+self.posenc_time_dim, 3, W)
+        # self.deform_scale_network = self.create_network(self.embedding_dim+self.posenc_time_dim, 3, W)
+        # self.deform_rotation_network = self.create_network(self.embedding_dim+self.posenc_time_dim, 4, W)
+        # self.deform_opacity_network = self.create_network(self.embedding_dim+self.posenc_time_dim, 1, W)
         #self.deform_rgb_network = self.create_network(W, 3, W)
 
     @property
@@ -397,15 +407,48 @@ class deform_embeddingnetwork(nn.Module):
 
     def create_network(self, input_ch,output_ch,hidden_dim):
         """创建输出网络"""
-        return nn.Sequential(nn.Linear(input_ch, hidden_dim),nn.ReLU(),nn.Linear(hidden_dim, output_ch))
+        return nn.Sequential(nn.Linear(input_ch, hidden_dim),nn.LeakyReLU(),nn.Linear(hidden_dim, output_ch))
+
+    def create_residual_network(self, input_ch, output_ch, hidden_dim):
+        """创建残差网络，支持指定宽度、深度、跳跃层数"""
+        
+        class ResidualNetwork(nn.Module):
+            def __init__(self, input_ch, output_ch, hidden_dim, depth, skip_layers):
+                super().__init__()
+                self.input_layer = nn.Linear(input_ch, hidden_dim)
+                self.hidden_layers = nn.ModuleList([nn.Linear(hidden_dim, hidden_dim) for _ in range(depth-2)])
+                self.output_layer = nn.Linear(hidden_dim, output_ch)
+                self.skip_layers = skip_layers
+                
+            def forward(self, x):
+                h = F.leaky_relu(self.input_layer(x))
+                residual = h
+                for i, layer in enumerate(self.hidden_layers):
+                    
+                    h = F.leaky_relu(layer(h))
+                    # 残差连接
+                    if i + 1 in self.skip_layers:
+                        h = h + residual
+                
+                return self.output_layer(h)
+        
+        return ResidualNetwork(
+            input_ch=input_ch, 
+            output_ch=output_ch, 
+            hidden_dim=hidden_dim,
+            depth=4,  # 使用类的深度参数
+            skip_layers=[2]  # 中间层添加残差连接
+        )
     
     def get_mlp_parameters(self):
         """获取MLP参数"""
-        return list(self.embedding_deform.parameters()) + \
-               list(self.deform_pos_network.parameters()) + \
-               list(self.deform_scale_network.parameters()) + \
-               list(self.deform_rotation_network.parameters()) + \
-               list(self.deform_opacity_network.parameters())
+        return self.parameters()
+    
+        # return list(self.embedding_deform.parameters()) + \
+        #        list(self.deform_pos_network.parameters()) + \
+        #        list(self.deform_scale_network.parameters()) + \
+        #        list(self.deform_rotation_network.parameters()) + \
+        #        list(self.deform_opacity_network.parameters())
     
     def forward(self, points, embeddings, scales, rotations, opacity, shs, times):
         """
@@ -416,13 +459,28 @@ class deform_embeddingnetwork(nn.Module):
         shs: [N, 9] SH系数
         times: [N, 1] 时间输入
         """
-        # 使用嵌入变形网络进行变形
-        deformed_latent_embeddings = self.embedding_deform(embeddings, times)
+        # # 使用嵌入变形网络进行变形
+        # deformed_latent_embeddings = self.embedding_deform(embeddings, times)
+
+        # xyz_emb = self.posenc_pos_fn(points)
+        # # contact embeddings with xyz embedding
+        # pos_embeddings = torch.cat([embeddings, xyz_emb], dim=-1)
+        # scales_embeddings = torch.cat([embeddings, scales], dim=-1)
+        # rotations_embeddings = torch.cat([embeddings, rotations], dim=-1)
+        # opacity_embeddings = torch.cat([embeddings, opacity], dim=-1)
+
+        time_embeddings = self.posenc_time_fn(times)
+        # contact embeddings with time embedding
+        embeddings = torch.cat([embeddings, time_embeddings], dim=-1)
+        pos_embeddings = self.posenc_pos_fn(points)
+        pos_embeddings = torch.cat([embeddings, pos_embeddings], dim=-1)
+        # scale_embeddings = torch.cat([embeddings, scales], dim=-1)
+        # rotation_embeddings = torch.cat([embeddings, rotations], dim=-1)
         # 应用变形
-        d_xyz = self.deform_pos_network(deformed_latent_embeddings)
-        d_scales = self.deform_scale_network(deformed_latent_embeddings)
-        d_rotations = self.deform_rotation_network(deformed_latent_embeddings)
-        d_opacity = self.deform_opacity_network(deformed_latent_embeddings)
+        d_xyz = self.deform_pos_network(pos_embeddings)
+        d_scales = self.deform_scale_network(embeddings)
+        d_rotations = self.deform_rotation_network(embeddings)
+        d_opacity = self.deform_opacity_network(embeddings)
 
         points = points + d_xyz
         scales = scales + d_scales

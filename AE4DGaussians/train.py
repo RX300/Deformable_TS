@@ -78,7 +78,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     if not viewpoint_stack and not opt.dataloader:
         # dnerf's branch
         viewpoint_stack = [i for i in train_cams]
-        temp_list = copy.deepcopy(viewpoint_stack)
+        temp_list = copy.deepcopy(viewpoint_stack)  # 深拷贝训练相机列表作为备份，用于在视点堆栈耗尽时重新填充
     # 
     batch_size = opt.batch_size
     print("data loading done")
@@ -99,8 +99,8 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     if stage == "coarse" and opt.zerostamp_init:
         load_in_memory = True
         # batch_size = 4
-        temp_list = get_stamp_list(viewpoint_stack,0)
-        viewpoint_stack = temp_list.copy()
+        temp_list = get_stamp_list(viewpoint_stack,0)  # 获取时间戳为0的视点列表，用于初始化训练
+        viewpoint_stack = temp_list.copy()             # 复制零时间戳视点列表作为当前训练视点堆栈
     else:
         load_in_memory = False 
                             # 
@@ -162,7 +162,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                     
                 viewpoint_cam = viewpoint_stack.pop(randint(0,len(viewpoint_stack)-1))
                 if not viewpoint_stack :
-                    viewpoint_stack =  temp_list.copy()
+                    viewpoint_stack =  temp_list.copy()  # 当前视点堆栈为空时，从备份列表重新填充视点堆栈
                 viewpoint_cams.append(viewpoint_cam)
                 idx +=1
             if len(viewpoint_cams) == 0:
